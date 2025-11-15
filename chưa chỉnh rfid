@@ -1,0 +1,131 @@
+#include <Servo.h>
+#include <SPI.h>
+#include <MFRC522.h>
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+#include <OneWire.h>
+#include <DallasTemperature.h>
+
+// ====== CẢM BIẾN ======
+#define ONE_WIRE_BUS 2   // DS18B20
+
+#define IR_IN 3
+#define IR_OUT 4
+#define IR_SLOT1 5
+#define IR_SLOT2 A0
+#define IR_SLOT3 A1
+
+#define SS_PIN 10
+#define RST_PIN 9
+
+Servo servoIn;
+Servo servoOut;
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+MFRC522 rfid(SS_PIN, RST_PIN);
+
+// DS18B20
+OneWire oneWire(ONE_WIRE_BUS);
+DallasTemperature sensors(&oneWire);
+
+int totalSlots = 3;       // tổng số chỗ
+int currentSlots = 3;     // chỗ còn lại
+int servoOpen = 90;       // góc mở barie
+int servoClose = 0;       // góc đóng barie
+
+void setup() {
+  Serial.begin(9600);
+  SPI.begin();
+  rfid.PCD_Init();
+  
+  pinMode(IR_IN, INPUT);
+  pinMode(IR_OUT, INPUT);
+  pinMode(IR_SLOT1, INPUT);
+  pinMode(IR_SLOT2, INPUT);
+  pinMode(IR_SLOT3, INPUT);
+
+  servoIn.attach(6);
+  servoOut.attach(7);
+  servoIn.write(servoClose);
+  servoOut.write(servoClose);
+
+  lcd.init();
+  lcd.backlight();
+  lcd.setCursor(0, 0);
+  lcd.print(" Smart Parking ");
+  lcd.setCursor(0, 1);
+  lcd.print("Initializing...");
+  
+  sensors.begin(); // DS18B20
+  delay(2000); // Chờ cảm biến ổn định
+  lcd.clear();
+}
+
+void loop() {
+  // ====== ĐỌC NHIỆT ĐỘ DS18B20 ======
+  sensors.requestTemperatures();
+  float tempDS = sensors.getTempCByIndex(0);
+
+  // ====== CẬP NHẬT SLOT ======
+  currentSlots = 0;
+  if (digitalRead(IR_SLOT1) == HIGH) currentSlots++;
+  if (digitalRead(IR_SLOT2) == HIGH) currentSlots++;
+  if (digitalRead(IR_SLOT3) == HIGH) currentSlots++;
+
+  // ====== HIỂN THỊ NHIỆT ĐỘ & SLOT LÊN LCD ======
+  lcd.setCursor(0, 0);
+  lcd.print("Temp:");
+  lcd.print(tempDS, 1);
+  lcd.print("C   ");
+
+  lcd.setCursor(0, 1);
+  lcd.print("Slots:");
+  lcd.print(currentSlots);
+  lcd.print("/");
+  lcd.print(totalSlots);
+  lcd.print("   ");
+
+  // Hiển thị DS18B20 trên Serial
+  Serial.print("DS18B20 Temp: ");
+  Serial.print(tempDS);
+  Serial.print("C | Slots: ");
+  Serial.println(currentSlots);
+
+  // ====== KIỂM TRA THẺ RFID ======
+  if (rfid.PICC_IsNewCardPresent() && rfid.PICC_ReadCardSerial()) {
+    // Hiển thị UID lên LCD
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Card UID:");
+
+    lcd.setCursor(0, 1);
+    for (byte i = 0; i < rfid.uid.size; i++) {
+      if (rfid.uid.uidByte[i] < 0x10) lcd.print("0"); // thêm số 0 nếu <0x10
+      lcd.print(rfid.uid.uidByte[i], HEX);
+      lcd.print(" ");
+    }
+
+    // In UID ra Serial để kiểm tra
+    Serial.print("Card UID: ");
+    for (byte i = 0; i < rfid.uid.size; i++) {
+      Serial.print(rfid.uid.uidByte[i], HEX);
+      Serial.print(" ");
+    }
+    Serial.println();
+
+    // Dừng thẻ hiện tại
+    rfid.PICC_HaltA();
+    rfid.PCD_StopCrypto1();
+
+    delay(2000); // giữ UID hiển thị 2 giây
+
+    // ====== MỞ BARIE CỔNG VÀ ĐÓNG LẠI ======
+    lcd.clear();
+    lcd.print("Access granted");
+    servoIn.write(servoOpen); // mở cổng vào
+    delay(2500);
+    servoIn.write(servoClose); // đóng lại
+    lcd.clear();
+  }
+
+  delay(500);
+}
