@@ -1,0 +1,349 @@
+import tkinter as tk
+from tkinter import ttk, messagebox
+import serial
+import serial.tools.list_ports
+import threading
+import json
+import os
+from datetime import datetime
+
+class SmartParkingGUI:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Smart Parking System")
+        self.root.geometry("900x700")
+        self.root.configure(bg="#2C3E50")
+        
+        # Biến quản lý
+        self.ser = None
+        self.is_running = False
+        self.registered_cards = self.load_registered_cards()
+        
+        # Tạo giao diện
+        self.create_widgets()
+        
+    def load_registered_cards(self):
+        """Tải danh sách thẻ đã đăng ký từ file"""
+        if os.path.exists("registered_cards.json"):
+            try:
+                with open("registered_cards.json", "r") as f:
+                    return json.load(f)
+            except:
+                return {}
+        return {}
+    
+    def save_registered_cards(self):
+        """Lưu danh sách thẻ đã đăng ký vào file"""
+        with open("registered_cards.json", "w") as f:
+            json.dump(self.registered_cards, f, indent=4)
+    
+    def create_widgets(self):
+        # ===== PHẦN HEADER =====
+        header_frame = tk.Frame(self.root, bg="#34495E", height=80)
+        header_frame.pack(fill="x", padx=10, pady=10)
+        header_frame.pack_propagate(False)
+        
+        title_label = tk.Label(header_frame, text="🚗 SMART PARKING SYSTEM", 
+                              font=("Arial", 24, "bold"), bg="#34495E", fg="white")
+        title_label.pack(pady=20)
+        
+        # ===== PHẦN KẾT NỐI COM PORT =====
+        connect_frame = tk.LabelFrame(self.root, text="Kết nối Arduino", 
+                                     font=("Arial", 12, "bold"), bg="#ECF0F1", fg="#2C3E50")
+        connect_frame.pack(fill="x", padx=10, pady=5)
+        
+        port_frame = tk.Frame(connect_frame, bg="#ECF0F1")
+        port_frame.pack(pady=10)
+        
+        tk.Label(port_frame, text="COM Port:", font=("Arial", 11), 
+                bg="#ECF0F1").grid(row=0, column=0, padx=5)
+        
+        self.port_combo = ttk.Combobox(port_frame, width=15, state="readonly")
+        self.port_combo.grid(row=0, column=1, padx=5)
+        self.refresh_ports()
+        
+        tk.Button(port_frame, text="Refresh", command=self.refresh_ports,
+                 bg="#3498DB", fg="white", font=("Arial", 10, "bold")).grid(row=0, column=2, padx=5)
+        
+        self.connect_btn = tk.Button(port_frame, text="Kết nối", command=self.toggle_connection,
+                                     bg="#27AE60", fg="white", font=("Arial", 11, "bold"), width=12)
+        self.connect_btn.grid(row=0, column=3, padx=5)
+        
+        self.status_label = tk.Label(connect_frame, text="● Chưa kết nối", 
+                                    font=("Arial", 10), bg="#ECF0F1", fg="#E74C3C")
+        self.status_label.pack(pady=5)
+        
+        # ===== PHẦN THÔNG TIN HỆ THỐNG =====
+        info_container = tk.Frame(self.root, bg="#2C3E50")
+        info_container.pack(fill="both", expand=True, padx=10, pady=5)
+        
+        # Cột trái: Thông tin realtime
+        left_frame = tk.LabelFrame(info_container, text="Thông tin hệ thống", 
+                                  font=("Arial", 12, "bold"), bg="#ECF0F1", fg="#2C3E50")
+        left_frame.pack(side="left", fill="both", expand=True, padx=(0, 5))
+        
+        # Nhiệt độ
+        temp_frame = tk.Frame(left_frame, bg="#ECF0F1")
+        temp_frame.pack(pady=10)
+        tk.Label(temp_frame, text="🌡️ Nhiệt độ:", font=("Arial", 12), 
+                bg="#ECF0F1").pack(side="left", padx=5)
+        self.temp_value = tk.Label(temp_frame, text="--°C", font=("Arial", 14, "bold"), 
+                                   bg="#ECF0F1", fg="#E67E22")
+        self.temp_value.pack(side="left")
+        
+        # Chỗ đỗ xe
+        slot_frame = tk.Frame(left_frame, bg="#ECF0F1")
+        slot_frame.pack(pady=10)
+        tk.Label(slot_frame, text="🅿️ Chỗ trống:", font=("Arial", 12), 
+                bg="#ECF0F1").pack(side="left", padx=5)
+        self.slot_value = tk.Label(slot_frame, text="0/3", font=("Arial", 14, "bold"), 
+                                   bg="#ECF0F1", fg="#27AE60")
+        self.slot_value.pack(side="left")
+        
+        # Card hiện tại
+        card_frame = tk.Frame(left_frame, bg="#ECF0F1")
+        card_frame.pack(pady=10)
+        tk.Label(card_frame, text="💳 Card ID:", font=("Arial", 12), 
+                bg="#ECF0F1").pack(anchor="w", padx=10)
+        self.card_value = tk.Label(card_frame, text="Chưa quét thẻ", font=("Arial", 11), 
+                                   bg="#ECF0F1", fg="#7F8C8D", wraplength=300)
+        self.card_value.pack(anchor="w", padx=10, pady=5)
+        
+        # Trạng thái thẻ
+        self.card_status = tk.Label(left_frame, text="", font=("Arial", 11, "bold"), 
+                                   bg="#ECF0F1", wraplength=300)
+        self.card_status.pack(pady=10)
+        
+        # ===== NÚT ĐIỀU KHIỂN SERVO THỦ CÔNG =====
+        control_frame = tk.LabelFrame(left_frame, text="Điều khiển thủ công", 
+                                     font=("Arial", 11, "bold"), bg="#ECF0F1", fg="#2C3E50")
+        control_frame.pack(fill="x", padx=10, pady=10)
+        
+        button_frame = tk.Frame(control_frame, bg="#ECF0F1")
+        button_frame.pack(pady=10)
+        
+        self.btn_open_in = tk.Button(button_frame, text="🚪 Mở cổng VÀO", 
+                                     command=self.manual_open_in,
+                                     bg="#3498DB", fg="white", 
+                                     font=("Arial", 11, "bold"), width=15, height=2)
+        self.btn_open_in.grid(row=0, column=0, padx=5, pady=5)
+        
+        self.btn_open_out = tk.Button(button_frame, text="🚪 Mở cổng RA", 
+                                      command=self.manual_open_out,
+                                      bg="#E67E22", fg="white", 
+                                      font=("Arial", 11, "bold"), width=15, height=2)
+        self.btn_open_out.grid(row=0, column=1, padx=5, pady=5)
+        
+        # Cột phải: Quản lý thẻ
+        right_frame = tk.LabelFrame(info_container, text="Quản lý thẻ RFID", 
+                                   font=("Arial", 12, "bold"), bg="#ECF0F1", fg="#2C3E50")
+        right_frame.pack(side="right", fill="both", expand=True, padx=(5, 0))
+        
+        # Đăng ký thẻ mới
+        register_frame = tk.Frame(right_frame, bg="#ECF0F1")
+        register_frame.pack(pady=10, padx=10, fill="x")
+        
+        tk.Label(register_frame, text="Tên chủ thẻ:", font=("Arial", 10), 
+                bg="#ECF0F1").pack(anchor="w")
+        self.owner_entry = tk.Entry(register_frame, font=("Arial", 11), width=25)
+        self.owner_entry.pack(pady=5, fill="x")
+        
+        tk.Label(register_frame, text="Card ID (từ quét thẻ):", font=("Arial", 10), 
+                bg="#ECF0F1").pack(anchor="w", pady=(5, 0))
+        self.register_card_entry = tk.Entry(register_frame, font=("Arial", 11), width=25)
+        self.register_card_entry.pack(pady=5, fill="x")
+        
+        tk.Button(register_frame, text="📝 Đăng ký thẻ", command=self.register_card,
+                 bg="#9B59B6", fg="white", font=("Arial", 10, "bold")).pack(pady=10)
+        
+        # Danh sách thẻ đã đăng ký
+        tk.Label(right_frame, text="Danh sách thẻ đã đăng ký:", 
+                font=("Arial", 10, "bold"), bg="#ECF0F1").pack(anchor="w", padx=10)
+        
+        list_frame = tk.Frame(right_frame, bg="#ECF0F1")
+        list_frame.pack(fill="both", expand=True, padx=10, pady=5)
+        
+        scrollbar = tk.Scrollbar(list_frame)
+        scrollbar.pack(side="right", fill="y")
+        
+        self.card_listbox = tk.Listbox(list_frame, font=("Courier", 9), 
+                                       yscrollcommand=scrollbar.set, height=10)
+        self.card_listbox.pack(fill="both", expand=True)
+        scrollbar.config(command=self.card_listbox.yview)
+        
+        tk.Button(right_frame, text="🗑️ Xóa thẻ đã chọn", command=self.delete_card,
+                 bg="#E74C3C", fg="white", font=("Arial", 10, "bold")).pack(pady=5)
+        
+        self.update_card_list()
+        
+        # ===== PHẦN LOG =====
+        log_frame = tk.LabelFrame(self.root, text="Nhật ký hoạt động", 
+                                 font=("Arial", 12, "bold"), bg="#ECF0F1", fg="#2C3E50")
+        log_frame.pack(fill="both", expand=True, padx=10, pady=10)
+        
+        log_scroll = tk.Scrollbar(log_frame)
+        log_scroll.pack(side="right", fill="y")
+        
+        self.log_text = tk.Text(log_frame, height=8, font=("Courier", 9), 
+                               yscrollcommand=log_scroll.set, bg="#FDFEFE")
+        self.log_text.pack(fill="both", expand=True, padx=5, pady=5)
+        log_scroll.config(command=self.log_text.yview)
+        
+        self.add_log("Hệ thống khởi động thành công!")
+    
+    # Mở cổng VÀO thủ công
+    def manual_open_in(self):
+        if self.ser:
+            self.ser.write(b"OPEN_IN\n")  # gửi lệnh Arduino
+            self.add_log("🚪 Mở cổng VÀO (thủ công)")
+        else:
+            messagebox.showwarning("Cảnh báo", "Chưa kết nối Arduino!")
+
+    # Mở cổng RA thủ công
+    def manual_open_out(self):
+        if self.ser:
+            self.ser.write(b"OPEN_OUT\n")  # gửi lệnh Arduino
+            self.add_log("🚪 Mở cổng RA (thủ công)")
+        else:
+            messagebox.showwarning("Cảnh báo", "Chưa kết nối Arduino!")
+
+    def refresh_ports(self):
+        """Làm mới danh sách COM port"""
+        ports = serial.tools.list_ports.comports()
+        port_list = [port.device for port in ports]
+        self.port_combo['values'] = port_list
+        if port_list:
+            self.port_combo.current(0)
+    
+    def toggle_connection(self):
+        """Kết nối/Ngắt kết nối với Arduino"""
+        if not self.is_running:
+            try:
+                port = self.port_combo.get()
+                if not port:
+                    messagebox.showerror("Lỗi", "Vui lòng chọn COM port!")
+                    return
+                
+                self.ser = serial.Serial(port, 9600, timeout=1)
+                self.is_running = True
+                self.connect_btn.config(text="Ngắt kết nối", bg="#E74C3C")
+                self.status_label.config(text=f"● Đã kết nối: {port}", fg="#27AE60")
+                self.add_log(f"Đã kết nối với {port}")
+                
+                # Bắt đầu thread đọc dữ liệu
+                self.read_thread = threading.Thread(target=self.read_serial, daemon=True)
+                self.read_thread.start()
+                
+            except Exception as e:
+                messagebox.showerror("Lỗi kết nối", f"Không thể kết nối: {str(e)}")
+        else:
+            self.is_running = False
+            if self.ser:
+                self.ser.close()
+            self.connect_btn.config(text="Kết nối", bg="#27AE60")
+            self.status_label.config(text="● Chưa kết nối", fg="#E74C3C")
+            self.add_log("Đã ngắt kết nối")
+    
+    def read_serial(self):
+        """Đọc dữ liệu từ Arduino"""
+        while self.is_running:
+            try:
+                if self.ser and self.ser.in_waiting > 0:
+                    line = self.ser.readline().decode('utf-8', errors='ignore').strip()
+                    self.process_data(line)
+            except Exception as e:
+                self.add_log(f"Lỗi đọc dữ liệu: {str(e)}")
+                break
+    
+    def process_data(self, data):
+        """Xử lý dữ liệu nhận được từ Arduino"""
+        # Xử lý nhiệt độ và slot
+        if "DS18B20 Temp:" in data:
+            parts = data.split("|")
+            if len(parts) >= 2:
+                temp = parts[0].split(":")[1].strip().replace("C", "")
+                slots = parts[1].split(":")[1].strip()
+                self.temp_value.config(text=f"{temp}°C")
+                self.slot_value.config(text=slots)
+        
+        # Xử lý Card UID
+        elif "Card UID:" in data:
+            card_uid = data.replace("Card UID:", "").strip().upper()
+            self.card_value.config(text=card_uid, fg="#2980B9")
+            self.register_card_entry.delete(0, tk.END)
+            self.register_card_entry.insert(0, card_uid)
+            
+            # Kiểm tra thẻ đã đăng ký chưa
+            if card_uid in self.registered_cards:
+                owner = self.registered_cards[card_uid]["owner"]
+                self.card_status.config(text=f"✅ Thẻ hợp lệ - {owner}", fg="#27AE60")
+                self.add_log(f"✅ Thẻ hợp lệ: {owner} ({card_uid})")
+                # Gửi phản hồi VALID về Arduino
+                if self.ser:
+                    self.ser.write(b"VALID\n")
+            else:
+                self.card_status.config(text="❌ Thẻ chưa đăng ký!", fg="#E74C3C")
+                self.add_log(f"❌ Thẻ chưa đăng ký: {card_uid}")
+                # Gửi phản hồi INVALID về Arduino
+                if self.ser:
+                    self.ser.write(b"INVALID\n")
+    
+    def register_card(self):
+        """Đăng ký thẻ RFID mới"""
+        owner = self.owner_entry.get().strip()
+        card_id = self.register_card_entry.get().strip().upper()
+        
+        if not owner or not card_id:
+            messagebox.showwarning("Cảnh báo", "Vui lòng nhập đầy đủ thông tin!")
+            return
+        
+        if card_id in self.registered_cards:
+            messagebox.showwarning("Cảnh báo", "Thẻ này đã được đăng ký!")
+            return
+        
+        self.registered_cards[card_id] = {
+            "owner": owner,
+            "registered_date": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }
+        self.save_registered_cards()
+        self.update_card_list()
+        
+        self.owner_entry.delete(0, tk.END)
+        self.register_card_entry.delete(0, tk.END)
+        
+        self.add_log(f"📝 Đăng ký thành công: {owner} - {card_id}")
+        messagebox.showinfo("Thành công", f"Đã đăng ký thẻ cho {owner}!")
+    
+    def delete_card(self):
+        """Xóa thẻ đã chọn"""
+        selection = self.card_listbox.curselection()
+        if not selection:
+            messagebox.showwarning("Cảnh báo", "Vui lòng chọn thẻ cần xóa!")
+            return
+        
+        selected = self.card_listbox.get(selection[0])
+        card_id = selected.split("-")[0].strip()
+        
+        if messagebox.askyesno("Xác nhận", f"Bạn có chắc muốn xóa thẻ {card_id}?"):
+            if card_id in self.registered_cards:
+                del self.registered_cards[card_id]
+                self.save_registered_cards()
+                self.update_card_list()
+                self.add_log(f"🗑️ Đã xóa thẻ: {card_id}")
+    
+    def update_card_list(self):
+        """Cập nhật danh sách thẻ đã đăng ký"""
+        self.card_listbox.delete(0, tk.END)
+        for card_id, info in self.registered_cards.items():
+            self.card_listbox.insert(tk.END, f"{card_id} - {info['owner']}")
+    
+    def add_log(self, message):
+        """Thêm log vào textbox"""
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        self.log_text.insert(tk.END, f"[{timestamp}] {message}\n")
+        self.log_text.see(tk.END)
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = SmartParkingGUI(root)
+    root.mainloop()
