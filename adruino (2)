@@ -1,0 +1,209 @@
+#include <Servo.h>
+#include <SPI.h>
+#include <MFRC522.h>
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+#include <OneWire.h>
+#include <DallasTemperature.h>
+
+// ====== CẢM BIẾN ======
+#define ONE_WIRE_BUS 2   // DS18B20
+#define IR_IN 3
+#define IR_OUT 4
+#define IR_SLOT1 5
+#define IR_SLOT2 A0
+#define IR_SLOT3 A1
+#define SS_PIN 10
+#define RST_PIN 9
+
+Servo servoIn;
+Servo servoOut;
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+MFRC522 rfid(SS_PIN, RST_PIN);
+
+// DS18B20
+OneWire oneWire(ONE_WIRE_BUS);
+DallasTemperature sensors(&oneWire);
+
+int totalSlots = 3;       // tổng số chỗ
+int currentSlots = 3;     // chỗ còn lại
+int servoOpen = 90;       // góc mở barie
+int servoClose = 0;       // góc đóng barie
+
+String lastCardUID = "";  // Lưu UID thẻ cuối cùng
+
+void setup() {
+  Serial.begin(9600);
+  SPI.begin();
+  rfid.PCD_Init();
+  
+  pinMode(IR_IN, INPUT);
+  pinMode(IR_OUT, INPUT);
+  pinMode(IR_SLOT1, INPUT);
+  pinMode(IR_SLOT2, INPUT);
+  pinMode(IR_SLOT3, INPUT);
+  
+  servoIn.attach(6);
+  servoOut.attach(7);
+  servoIn.write(servoClose);
+  servoOut.write(servoClose);
+  
+  lcd.init();
+  lcd.backlight();
+  lcd.setCursor(0, 0);
+  lcd.print(" Smart Parking ");
+  lcd.setCursor(0, 1);
+  lcd.print("Initializing...");
+  
+  sensors.begin(); // DS18B20
+  delay(2000); // Chờ cảm biến ổn định
+  lcd.clear();
+}
+
+void loop() {
+  // ====== KIỂM TRA LỆNH TỪ PYTHON ======
+  if (Serial.available() > 0) {
+    String command = Serial.readStringUntil('\n');
+    command.trim();
+    
+    if (command == "OPEN_IN") {
+      lcd.clear();
+      lcd.print("Manual Open IN");
+      servoIn.write(servoOpen);
+      delay(3000);
+      servoIn.write(servoClose);
+      lcd.clear();
+      Serial.println("OPENED_IN");
+    }
+    else if (command == "OPEN_OUT") {
+      lcd.clear();
+      lcd.print("Manual Open OUT");
+      servoOut.write(servoOpen);
+      delay(3000);
+      servoOut.write(servoClose);
+      lcd.clear();
+      Serial.println("OPENED_OUT");
+    }
+  }
+  
+  // ====== ĐỌC NHIỆT ĐỘ DS18B20 ======
+  sensors.requestTemperatures();
+  float tempDS = sensors.getTempCByIndex(0);
+  
+  // ====== CẬP NHẬT SLOT ======
+  currentSlots = 0;
+  if (digitalRead(IR_SLOT1) == HIGH) currentSlots++;
+  if (digitalRead(IR_SLOT2) == HIGH) currentSlots++;
+  if (digitalRead(IR_SLOT3) == HIGH) currentSlots++;
+  
+  // ====== HIỂN THỊ NHIỆT ĐỘ & SLOT LÊN LCD ======
+  lcd.setCursor(0, 0);
+  lcd.print("Temp:");
+  lcd.print(tempDS, 1);
+  lcd.print("C   ");
+  
+  lcd.setCursor(0, 1);
+  lcd.print("Slots:");
+  lcd.print(currentSlots);
+  lcd.print("/");
+  lcd.print(totalSlots);
+  lcd.print("   ");
+  
+  // Gửi dữ liệu qua Serial cho Python
+  Serial.print("DS18B20 Temp: ");
+  Serial.print(tempDS);
+  Serial.print("C | Slots: ");
+  Serial.print(currentSlots);
+  Serial.print("/");
+  Serial.println(totalSlots);
+  
+  // ====== KIỂM TRA THẺ RFID ======
+  if (rfid.PICC_IsNewCardPresent() && rfid.PICC_ReadCardSerial()) {
+    // Đọc UID và chuyển thành chuỗi HEX
+    String cardUID = "";
+    for (byte i = 0; i < rfid.uid.size; i++) {
+      if (rfid.uid.uidByte[i] < 0x10) cardUID += "0";
+      cardUID += String(rfid.uid.uidByte[i], HEX);
+      if (i < rfid.uid.size - 1) cardUID += " ";
+    }
+    cardUID.toUpperCase();
+    
+    // Chỉ xử lý nếu là thẻ mới (tránh đọc lặp)
+    if (cardUID != lastCardUID) {
+      lastCardUID = cardUID;
+      
+      // Hiển thị UID lên LCD
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print("Card UID:");
+      lcd.setCursor(0, 1);
+      lcd.print(cardUID);
+      
+      // Gửi UID qua Serial cho Python
+      Serial.print("Card UID: ");
+      Serial.println(cardUID);
+      
+      // Dừng thẻ hiện tại
+      rfid.PICC_HaltA();
+      rfid.PCD_StopCrypto1();
+      
+      // Chờ phản hồi từ Python (timeout 3 giây)
+      String response = waitForResponse(3000);
+      
+      if (response == "VALID") {
+        // Thẻ hợp lệ - mở cổng
+        lcd.clear();
+        lcd.print("Access Granted!");
+        lcd.setCursor(0, 1);
+        lcd.print("Welcome!");
+        
+        servoIn.write(servoOpen);
+        delay(3000);
+        servoIn.write(servoClose);
+        
+      } else if (response == "INVALID") {
+        // Thẻ không hợp lệ
+        lcd.clear();
+        lcd.print("Access Denied!");
+        lcd.setCursor(0, 1);
+        lcd.print("Card not reg.");
+        delay(2000);
+        
+      } else {
+        // Không nhận được phản hồi (Python chưa kết nối)
+        lcd.clear();
+        lcd.print("System Error");
+        lcd.setCursor(0, 1);
+        lcd.print("No connection");
+        delay(2000);
+      }
+      
+      lcd.clear();
+    }
+    
+    // Reset sau 5 giây không quét thẻ
+  } else {
+    if (lastCardUID != "" && millis() % 5000 < 500) {
+      lastCardUID = "";
+    }
+  }
+  
+  delay(500);
+}
+
+// Hàm đợi phản hồi từ Python
+String waitForResponse(unsigned long timeout) {
+  unsigned long startTime = millis();
+  String response = "";
+  
+  while (millis() - startTime < timeout) {
+    if (Serial.available() > 0) {
+      response = Serial.readStringUntil('\n');
+      response.trim();
+      return response;
+    }
+    delay(10);
+  }
+  
+  return ""; // Timeout
+}
